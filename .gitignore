@@ -1,0 +1,9 @@
+# Log files #
+###################
+logs/*.log
+
+# Report files #
+###################
+reports/*.jtl
+reports/*.html
+

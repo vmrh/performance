@@ -1,0 +1,699 @@
+#!/usr/bin/perl
+#
+#---------------------------------------------------------------------------
+# Copyright (c) 2013 Vicente Manuel Rustarazo Hervas MIT
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+#of this software and associated documentation files (the "Software"), to deal
+#in the Software without restriction, including without limitation the rights
+#to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+#copies of the Software, and to permit persons to whom the Software is
+#furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in
+#all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+#IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+#FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+#AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+#LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+#OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+#THE SOFTWARE.
+#---------------------------------------------------------------------------
+#
+# File Name                  : jtl2html
+# Author                     : Vicente Rustarazo
+# Approver                   :
+# Version                    : 1.0.0
+# Date                       : 2013-12-25
+# License					 : MIT License
+#
+# HISTORY
+# -------
+#
+# Rev   Date            Who     Description / Reason
+# ------------------------------------------------------------------
+# 1.0.0 2013-12-25      VMRH     Generic URL for reports
+
+#---------------------------------------------------------------------
+# Description of program
+#
+# Generate an HTMl report for JTL file
+#
+#---------------------------------------------------------------------
+
+use strict;
+use warnings;
+use File::Basename;
+use threads;
+
+# Check number of arguments
+@ARGV == 1 or die "Usage: jtl2html <file>\n";
+
+my $JTL_FILE=$ARGV[0];
+# Get base name for JTL file
+my $JTL_BASE_NAME = basename( $JTL_FILE,  ".jtl");
+my $TMP = "tmp.$JTL_BASE_NAME";
+
+printf "JTL file name: $JTL_FILE \n";
+printf "JTL base name: $JTL_BASE_NAME \n";
+printf "TMP directory: $TMP \n";
+
+my @callNames = ( 
+			"portal_home",
+			"portal_login",
+			"portal_logout",
+			"Version",
+			"Jenkins",
+			"Sonar",
+			"Nexus",
+			"Sites",
+			"Docs",
+			"Configuration",
+			"Logs",
+			"Tomcat",
+			"JDBC_Request_Update");
+
+
+# Check if tmp directory exist
+if(! -d $TMP ){ 
+	# Create directory
+  	mkdir ( $TMP );
+  	printf "Directory \"$TMP\" created.\n"; 
+}
+
+
+# Create an array for threads names
+my $url_names_string = ";";
+# Array for files opens
+my @url_name_files;
+my @url_files = ();
+
+printf "Starting: ";
+printTime();
+
+# Open JTL file for reading
+open(MYINPUTFILE, "<$JTL_FILE");
+# Read all file
+while(<MYINPUTFILE>)
+{
+	my($line) = $_;
+	chomp($line);
+
+	if(($line =~m|^<sample t="(\d+)" lt="(\d+)" ts="(\d+)" s="(.*?)" lb="(.*?)" rc="(.*?)" rm="(.*?)" tn="(.*?)" dt="text" by="(\d+)"[/]{0,1}>$|) ||
+		($line =~m|^<sample t="(\d+)" lt="(\d+)" ts="(\d+)" s="(.*?)" lb="(.*?)" rc="(.*?)" rm="(.*?)" tn="(.*?)" dt="" by="(\d+)"[/]{0,1}>$|) ||
+		($line =~m|^<httpSample t="(\d+)" lt="(\d+)" ts="(\d+)" s="(.*?)" lb="(.*?)" rc="(.*?)" rm="(.*?)" tn="(.*?)" dt="text" by="(\d+)"[/]{0,1}>$|) ||
+		($line =~m|^<httpSample t="(\d+)" lt="(\d+)" ts="(\d+)" s="(.*?)" lb="(.*?)" rc="(.*?)" rm="(.*?)" tn="(.*?)" dt="" by="(\d+)"[/]{0,1}>$|)
+		)
+ 	{
+ 		# Get data
+ 		my($time,$latencytime,$timestamp,$success,$url,$responsecode,$responsemessage,$thead_name,$by) = ($1,$2,$3,$4,$5,$6,$7,$8,$9);
+
+		$responsemessage =~ s/ /_/g; 
+		$responsecode =~ s/ /_/g; 
+		$url =~ s/ /_/g; 
+		
+		# format line and print
+		$line = sprintf("$timestamp %s %s %s %d %s %d", $url,$responsecode,$responsemessage,$time,$success,$by);
+
+
+		# Check file we need to save to
+		for my $i (0..$#callNames) {
+			# Check if url is the same
+			if ( $url =~m|(/gateway)?$callNames[$i]|)
+			{
+				# Check if file is opened
+				# Check if thread names string has this thread name
+				if($url_names_string !~m|;$callNames[$i];|)
+	 			{
+					# Add new thread name
+					$url_names_string= $url_names_string . $callNames[$i] . ';';
+
+					# Create name for file
+					my $URL_BASE_NAME = basename( $callNames[$i]);
+
+					$url_name_files[$i] = "${TMP}/${JTL_BASE_NAME}_${URL_BASE_NAME}";
+
+					# Open a file with this name
+					my $file;
+					open($file,">","$url_name_files[$i]");
+
+					$url_files[$i] = $file;
+			
+					# Write line
+					print $file "$line\n";
+				} else 
+				{
+					my $file = $url_files[$i];
+					# Write line on file already open
+					print $file "$line\n";
+				}
+			}			
+		}		
+ 	}
+}
+
+# Close files
+close(MYINPUTFILE);
+
+# Close all threads files for threads names
+for my $i (0..$#url_files) {
+	if (exists $url_files[$i])
+	{
+		close($url_files[$i]);
+	}
+}
+
+# Create different threads, one per each of URL we have to generate statistics
+my @url_statistics = ();
+for my $i (0..$#url_name_files) {
+	if (exists $url_name_files[$i])
+	{
+		# Print file to analyse
+		printf "Analysing: ${i}, file: $url_name_files[$i] \n";
+		# Calculate statistics for each of the url
+		my $thr = threads->create('url_statistics', $JTL_FILE, $url_name_files[$i]);
+		$url_statistics[$i] = $thr;
+	}
+}
+
+# Wait till all threads finish
+for my $i (0..$#url_statistics) {
+	if (exists $url_statistics[$i])
+	{
+		my $url_statistic = $url_statistics[$i];
+		$url_statistic->join();
+	}
+}
+
+# Print html file
+printHTML("${JTL_FILE}.html",\@url_name_files);
+
+printf "Finishing: ";
+printTime();
+
+exit;
+
+
+# Subroutine to calculate statistics for URL
+sub url_statistics {
+	@_ == 2 or die('Sub usage: url_statistics(JTL_FILE, url_file_name);');
+	my ($JTL_FILE,$url_file_name) = @_;
+	
+	# Create a vector for all responses, to get max, min average, etc
+	my @time_ok;
+	my @time_nok;
+	my @rc_errors;
+	my @timestamps;
+	my @bytes_ok;
+
+	my $mintimestamp = 9999999999999999;
+	my $maxtimestamp = 0;
+	my $min = 99999999999999999;
+	my $max = 0;
+	my $avrg_ok = 0;
+	my $count_ok = 0;
+	my $avrg_nok = 0;
+	my $count_nok = 0;
+	my $url_report = "";
+	
+	my $min_bytes = 99999999999999999;
+	my $max_bytes = 0;
+	my $avrg_bytes = 0;
+	
+	
+	
+	# Open file read only
+	open(url_file, "<$url_file_name");
+
+	while(<url_file>)
+	{
+		my($line) = $_;
+		chomp($line);
+		if($line =~m|^(\d+) (.*?) (.*?) (.*?) (\d+) (.*?) (\d+)$|)
+	 	{
+			# Get data
+	 		my($timestamp,$url,$response_code,$response_message,$time,$success,$bytes) = ($1,$2,$3,$4,$5,$6,$7);
+	 		
+	 		$url_report= $url;
+	 		
+	 		# Check time stamp
+			if ($timestamp > $maxtimestamp)
+			{
+				$maxtimestamp = $timestamp
+			}
+			if ($timestamp < $mintimestamp)
+			{
+				$mintimestamp = $timestamp
+			}
+			
+	 		#push(@timestamps, ${timestamp});
+	 		
+	 		# Check if it is a correct response
+			if ( ${response_code} =~m|^2[02][0123456789]$| && ${success} =~m|^true$| )
+			{
+				# Push time to numbers
+				push(@time_ok, $time);
+				$avrg_ok+=$time;
+				$count_ok++;
+				
+				# Check max and min
+				if ($time > $max)
+				{
+					$max = $time
+				}
+				if ($time < $min)
+				{
+					$min = $time
+				}	
+				
+				# Push to bytes
+				push(@bytes_ok, $bytes);
+				$avrg_bytes+=$bytes;
+				
+				# Check max and min
+				if ($bytes > $max_bytes)
+				{
+					$max_bytes = $bytes
+				}
+				if ($bytes < $min_bytes)
+				{
+					$min_bytes = $bytes
+				}	
+							
+			} else
+			{
+				# Push time to numbers
+				#push(@time_nok, $time);
+
+				$avrg_nok+=$time;
+				$count_nok++;
+
+				# Push errors
+				if ( ${response_code} =~m|^20[01]$| )
+				{
+					push(@rc_errors, "Assertion failure");	
+				} else
+				{
+					push(@rc_errors, "${response_code} - ${response_message}");	
+				}
+			}
+		}
+	}
+	# Close file
+	close(url_file);
+	
+	my $duration = ($maxtimestamp-$mintimestamp)/1000;
+	my $test = ($count_ok+$count_nok);
+	my $success = 100;
+
+	if ($count_ok > 0)
+	{
+		$avrg_ok=$avrg_ok/$count_ok;
+		$avrg_bytes=$avrg_bytes/$count_ok;
+		
+		$avrg_bytes=$avrg_bytes/1024;
+		$max_bytes=$max_bytes/1024;
+		$min_bytes=$min_bytes/1024;
+		
+	}
+
+	if ($count_nok > 0)
+	{
+		# Calculate numbers for erros
+		$avrg_nok=$avrg_nok/$count_nok;	
+		$success = ($count_ok*100)/$test
+	}
+	# Get tps
+	my $tps = 0;
+	if ( $duration > 0)
+	{
+		$tps = ($count_ok+$count_nok)/$duration;
+	}
+
+	#printf "$url_file_name, Min timestamp: $mintimestamp\n";
+	#printf "$url_file_name, Max timestamp: $maxtimestamp\n";	
+	#printf "$url_file_name, Duration for test: $duration\n";	
+	#printf "$url_file_name, Min: $min\n";
+	#printf "$url_file_name, Max: $max\n";
+	#printf "$url_file_name, Responses ok: count_ok\n";	
+	#printf "$url_file_name, Average ok: $avrg_ok\n";	
+	#printf "$url_file_name, Responses nok: $count_nok\n";
+	#printf "$url_file_name, Average nok: $avrg_nok\n";	
+	#printf "$url_file_name, TPS: $tps\n";
+	
+	
+	# Print html report, open file
+	open(url_file_output, ">${url_file_name}.html");
+	
+	if ($count_nok > 0)
+	{
+		print url_file_output "<tr valign=\"top\" class=\"Failure\">";
+	} else
+	{
+		print url_file_output "<tr valign=\"top\" class=\"\">";
+	}
+		
+	print url_file_output "<td>$url_report</td><td>$test</td><td>$count_nok</td><td>$success%</td><td>$avrg_ok</td><td>$min</td><td>$max</td><td>$avrg_bytes</td><td>$min_bytes</td><td>$max_bytes</td><td>$mintimestamp</td><td>$maxtimestamp</td><td>$duration</td><td>$tps</td> ";
+	
+	print url_file_output "</tr> ";
+	
+	# Close html file
+	close(url_file_output);
+	
+	# If there are errors print it
+	if ($count_nok > 0)
+	{
+		# Count unique errrors
+		#count_unique(@rc_errors);
+		
+		# Print html report, open file
+		open(url_file_err, ">${url_file_name}_err.html");
+			
+		print url_file_err "		<h3>$url_report</h3> ";
+		print url_file_err "		<table width=\"95\%\" cellspacing=\"2\" cellpadding=\"5\" border=\"0\" class=\"details\">";
+		print url_file_err "			<tr valign=\"top\">" ;
+		print url_file_err "				<th>Response</th><th>Number of times</th> ";
+		print url_file_err "			</tr> ";
+
+		my %count;
+		map { $count{$_}++ } @rc_errors;
+
+		#print them out:
+		map {print url_file_err "<tr><td>$_</td><td>${count{$_}}</td></tr>"} sort keys(%count);
+		
+		print url_file_err "		</table> ";
+		
+		# Close html file
+		close(url_file_err);
+	}
+	
+	# Print OK statistics for time
+	printStatisticsHTML("${url_file_name}","$url_report",\@time_ok);
+	
+}
+
+
+sub percentile {
+    my ( $p, $aref ) = @_;
+    my $percentile = int( $p * $#{$aref} / 100 );
+
+    return @$aref[$percentile];
+}
+
+sub average {
+    @_ == 1 or die('Sub usage: $average = average(\@array);');
+    my ($array_ref) = @_;
+    my $sum = 0;
+    my $count = scalar @$array_ref;
+    foreach (@$array_ref) {
+        $sum += $_;
+    }
+    if ( $count > 0 )
+    {
+	    return $sum / $count;
+	}
+	
+	return 0;
+}
+
+sub add {
+    @_ == 1 or die('Sub usage: $add = add(\@array);');
+    my ($array_ref) = @_;
+    my $sum;
+    foreach (@$array_ref) {
+        $sum += $_;
+    }
+    return $sum;
+}
+
+sub median {
+    @_ == 1 or die('Sub usage: $median = median(\@array);');
+    my ($array_ref) = @_;
+    my $count = scalar @$array_ref;
+
+    my @array = @$array_ref;
+    if ( $count % 2 ) {
+        return $array[ int( $count / 2 ) ];
+    }
+    else {
+        return ( $array[ $count / 2 ] + $array[ $count / 2 - 1 ] ) / 2;
+    }
+}
+
+sub count_unique {
+	my (@array) = @_;
+	my %count;
+	map { $count{$_}++ } @array;
+
+	#print them out:
+	map {print "$_ = ${count{$_}}\n"} sort keys(%count);
+
+	#or just return the hash:
+	return %count;
+}
+
+sub printTime {
+	my @months = qw(Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec);
+	my @weekDays = qw(Sun Mon Tue Wed Thu Fri Sat Sun);
+	my ($second, $minute, $hour, $dayOfMonth, $month, $yearOffset, $dayOfWeek, $dayOfYear, $daylightSavings) = localtime();
+	my $year = 1900 + $yearOffset;
+	my $theTime = "$hour:$minute:$second, $weekDays[$dayOfWeek] $months[$month] $dayOfMonth, $year";
+	printf "$theTime\n"; 
+}
+
+sub printStatisticsHTML {
+	@_ == 3 or die('Sub usage: printStatisticsHTML(HTML_FILE_NAME,url_report,\@array);');
+	my ($HTML_FILE_NAME, $url_report, $array_ref) = @_;
+    my @numbers = @$array_ref;
+    
+    my $totalSamples= scalar @numbers;
+
+	my $avrg = 0;
+	my $median= 0;
+	my $min = 0;
+	my $max = 0;
+	
+	my $percentile75 = 0;
+	my $percentile85 = 0;
+	my $percentile95 = 0;
+	my $percentile99 = 0;	
+
+	if ( $totalSamples > 0 )
+	{
+		@numbers = sort { $a <=> $b } @numbers;
+
+		$avrg = average( \@numbers );
+		$median= median( \@numbers );
+		$min = $numbers[0];
+		$max = $numbers[-1];
+	
+		$percentile75 = percentile( 75, \@numbers );
+		$percentile85 = percentile( 85, \@numbers );
+		$percentile95 = percentile( 95, \@numbers );
+		$percentile99 = percentile( 99, \@numbers );	
+
+		#printf "Total Samples %d \n", $totalSamples;
+		#printf "Average %f \n", $avrg;
+		#printf "Median %f \n",  $median;
+		#printf "Min %f \n",     $min;
+		#printf "Max %f \n",     $max;
+		#printf "75th Percentile %f\n", $percentile75;
+		#printf "85th Percentile %f\n", $percentile85;
+		#printf "95th Percentile %f\n", $percentile95;
+		#printf "99th Percentile %f\n", $percentile99;	
+	}
+		
+	# Print information on file
+	open(html_file_output, ">${HTML_FILE_NAME}_ok.html");
+	
+	print html_file_output "<tr valign=\"top\" class=\"\"> \n";
+	print html_file_output "<td>${url_report}</td><td>${totalSamples}</td><td>${avrg}</td><td>${median}</td><td>${min}</td><td>${max}</td><td>$percentile75</td><td>$percentile85</td><td>$percentile95</td><td>$percentile99</td> \n";
+	print html_file_output "</tr> \n";
+
+	
+	close(html_file_output);	
+}
+
+sub printHTML 
+{
+	@_ == 2 or die('Sub usage: printHTML(HTML_FILE_NAME,\@url_file_names);');
+	my ($HTML_FILE_NAME, $array_ref) = @_;
+    my @url_file_names = @$array_ref;
+
+	# Print information on file
+	open(html_file_output, ">${HTML_FILE_NAME}");
+
+	print html_file_output "<!DOCTYPE html PUBLIC \"-//W3C//DTD HTML 4.01 Transitional//EN\">"; 
+	print html_file_output "<html> ";
+	print html_file_output "<head> ";
+	print html_file_output "<META http-equiv=\"Content-Type\" content=\"text/html; charset=US-ASCII\"> ";
+	print html_file_output "<title>Performance Test Results: $HTML_FILE_NAME</title> ";
+	print html_file_output "<style type=\"text/css\">" ;
+	print html_file_output "				body {";
+	print html_file_output "					font:normal 68% verdana,arial,helvetica;";
+	print html_file_output "					color:#000000;";
+	print html_file_output "				}";
+	print html_file_output "				table tr td, table tr th {";
+	print html_file_output "					font-size: 68%;";
+	print html_file_output "				}";
+	print html_file_output "				table.details tr th{";
+	print html_file_output "					font-weight: bold;";
+	print html_file_output "					text-align:left;";
+	print html_file_output "					background:#a6caf0;";
+	print html_file_output "					white-space: nowrap;";
+	print html_file_output "				}";
+	print html_file_output "				table.details tr td{";
+	print html_file_output "					background:#eeeee0;";
+	print html_file_output "					white-space: nowrap;";
+	print html_file_output "				}";
+	print html_file_output "				h1 {";
+	print html_file_output "					margin: 0px 0px 5px; font: 165% verdana,arial,helvetica";
+	print html_file_output "				}";
+	print html_file_output "				h2 {";
+	print html_file_output "					margin-top: 1em; margin-bottom: 0.5em; font: bold 125% verdana,arial,helvetica";
+	print html_file_output "				}";
+	print html_file_output "				h3 {";
+	print html_file_output "					margin-bottom: 0.5em; font: bold 115% verdana,arial,helvetica";
+	print html_file_output "				}";
+	print html_file_output "				.Failure {";
+	print html_file_output "					font-weight:bold; color:red;";
+	print html_file_output "				}";
+	print html_file_output "			</style> ";
+	print html_file_output "</head> ";
+	print html_file_output "<body> ";
+	print html_file_output "<h1>Performance Test Results: $HTML_FILE_NAME</h1> ";
+	print html_file_output "<table width=\"100%\">" ;
+	print html_file_output "<tr> ";
+	print html_file_output "<td align=\"left\"></td><td align=\"right\">Designed for use with <a href=\"http://jakarta.apache.org/jmeter\">JMeter</a>.</td> ";
+	print html_file_output "</tr> ";
+	print html_file_output "</table> ";
+	print html_file_output "<hr size=\"1\"> ";
+	print html_file_output "<h2>Summary</h2> ";
+	
+	# Check if we have the summary
+	if ( -e "${JTL_FILE}_agg.html")
+	{
+		# Print summary
+		print html_file_output "<table width=\"95%\" cellspacing=\"2\" cellpadding=\"5\" border=\"0\" class=\"details\"> ";
+		print html_file_output "<tr valign=\"top\"> ";
+		print html_file_output "<th>Total transaction</th><th>Average Time (ms)</th><th>Min Time (ms)</th><th>Max Time (ms)</th>";
+		print html_file_output "</tr> ";
+		print html_file_output "<tr valign=\"top\" class=\"\">" ;
+		open(agg_file, "<${JTL_FILE}_agg.html");
+
+		while(<agg_file>)
+		{
+			my($line) = $_;
+			chomp($line);
+			print html_file_output "$line ";					
+		}
+				
+		close(agg_file);
+		
+		print html_file_output "</tr> ";
+		print html_file_output "</table> ";
+		print html_file_output "<hr align=\"left\" width=\"95%\" size=\"1\">" ;
+		print html_file_output "<h2>Pages</h2> ";
+	}
+	print html_file_output "<table width=\"95%\" cellspacing=\"2\" cellpadding=\"5\" border=\"0\" class=\"details\">" ;
+	print html_file_output "<tr valign=\"top\"> ";
+	print html_file_output "<th>URL</th><th>Tests</th><th>Failures</th><th>Success Rate</th><th>Average Time (ms)</th><th>Min Time (ms)</th><th>Max Time (ms)</th><th>Average Response (KB)</th><th>Min Response (KB)</th><th>Max Response (KB)</th><th>Start test (ms)</th><th>Finish test (ms)</th><th>Duration (s)</th><th>TPS</th> ";
+	print html_file_output "</tr> ";
+
+	# Add results
+	for my $i (0..$#url_name_files) {
+		if (exists $url_name_files[$i])
+		{
+			# Check if file exists
+			if ( -e "$url_name_files[$i].html")
+			{
+				# Copy content
+				# Open file read only
+				open(url_file, "<$url_name_files[$i].html");
+
+				while(<url_file>)
+				{
+					my($line) = $_;
+					chomp($line);
+					print html_file_output "$line ";					
+				}
+				
+				close(url_file);
+			}
+		}
+	}
+
+	print html_file_output "</table> ";
+	print html_file_output "<hr align=\"left\" width=\"95%\" size=\"1\">" ;
+	
+	# Statistics for ok
+	print html_file_output "<h2>Correct transactions summary</h2> ";
+	print html_file_output "<table width=\"95%\" cellspacing=\"2\" cellpadding=\"5\" border=\"0\" class=\"details\">" ;
+	print html_file_output "<tr valign=\"top\"> ";
+	print html_file_output "<th>URL</th><th>Total</th><th>Average Time (ms)</th><th>Median (ms)</th><th>Min Time (ms)</th><th>Max Time (ms)</th><th>Percentile 75</th><th>Percentile 85</th><th>Percentile 95</th><th>Percentile 99</th>";
+	print html_file_output "</tr> ";
+	# Add results
+	for my $i (0..$#url_name_files) {
+		if (exists $url_name_files[$i])
+		{
+			# Check if file exists
+			if ( -e "$url_name_files[$i]_ok.html")
+			{
+				# Copy content
+				# Open file read only
+				open(url_file, "<$url_name_files[$i]_ok.html");
+
+				while(<url_file>)
+				{
+					my($line) = $_;
+					chomp($line);
+					print html_file_output "$line ";					
+				}
+				
+				close(url_file);
+			}
+		}
+	}
+
+	print html_file_output "</table> ";
+	print html_file_output "<hr align=\"left\" width=\"95%\" size=\"1\">" ;	
+	
+	# Check if there are erros
+	my $errors = 0;
+	for my $i (0..$#url_name_files) {
+		if (exists $url_name_files[$i])
+		{
+			# Check if file exists
+			if ( -e "$url_name_files[$i]_err.html")
+			{
+				# Write first line for errors
+				if ( $errors == 0)
+				{
+					# Print first line for errors
+					print html_file_output "<h2>Failure Detail</h2> ";
+				}
+				$errors++;
+				# Copy content
+				# Open file read only
+				open(url_file, "<$url_name_files[$i]_err.html");
+
+				while(<url_file>)
+				{
+					my($line) = $_;
+					chomp($line);
+					print html_file_output "$line";					
+				}
+				
+				close(url_file);
+			}
+		}
+	}	
+	
+	print html_file_output "</body> ";
+	print html_file_output "</html> ";
+
+
+	close(html_file_output);
+}

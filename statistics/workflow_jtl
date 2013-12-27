@@ -1,0 +1,432 @@
+#!/usr/bin/perl
+#
+#---------------------------------------------------------------------------
+# Copyright (C) 2011 WAC
+#---------------------------------------------------------------------------
+#
+# File Name                  : analyse_jtl
+# Author                     : Vicente Rustarazo
+# Approver                   :
+# Version                    : 1.0.0
+# Date                       : 2011-08-14
+#
+# HISTORY
+# -------
+#
+# Rev   Date            Who     Description / Reason
+# ------------------------------------------------------------------
+# 1.0.0 2011-08-16      VMRH     
+
+#---------------------------------------------------------------------
+# Description of program
+#
+# Calculate latency statistical information from WAC perf _jtl Del files.
+# Currently generates 75th, 85th, 95th, 99th percentile, average,
+# median, minimum and maximum.
+# Specify the location of the .jtl file on the command line.
+#
+#---------------------------------------------------------------------
+
+use strict;
+use warnings;
+use File::Basename;
+use threads;
+
+# Check number of arguments
+@ARGV > 0 or die "Usage: dot2_payment_jtl <file> [<NUMBEROFREQUESTPERLOOP>]\n";
+@ARGV < 3 or die "Usage: dot2_payment_jtl <file> [<NUMBEROFREQUESTPERLOOP>]\n";
+
+# Get parameters
+my $JTL_FILE=$ARGV[0];
+my $NUMBEROFREQUESTPERLOOP=6;
+if ( @ARGV == 2 && $ARGV[1] =~ /^-?\d+$/){
+	$NUMBEROFREQUESTPERLOOP=$ARGV[1];
+} else {
+	# Check name in order to know the number of request we need
+	if ( ${JTL_FILE} =~m|MSISDN-Token|){
+		$NUMBEROFREQUESTPERLOOP=4;	
+	} else
+	{
+		if ( ${JTL_FILE} =~m|MSISDN|){
+			$NUMBEROFREQUESTPERLOOP=5;	
+		} else
+		{
+			if ( ${JTL_FILE} =~m|Token|){
+				$NUMBEROFREQUESTPERLOOP=5;	
+			} else
+			{
+				# Defeault value 6
+				$NUMBEROFREQUESTPERLOOP=6;	 
+			}	
+		}
+	}
+}
+
+printf "Number of request for payment: $NUMBEROFREQUESTPERLOOP \n"; 
+
+# Get base name for JTL file
+my $JTL_BASE_NAME = basename( $JTL_FILE,  ".jtl");
+my $TMP = "tmp.$JTL_BASE_NAME";
+my $CSV_FILE_NAME="${TMP}/${JTL_BASE_NAME}_csv";
+
+printf "JTL file name: $JTL_FILE \n"; 
+printf "JTL base name: $JTL_BASE_NAME \n"; 
+printf "CSV file name: $CSV_FILE_NAME \n"; 
+printf "TMP directory: $TMP \n";
+
+my $STARTURL="/2/oauth/authorize";
+my $ENDURL="/2/payment";	
+
+
+
+# Check if tmp directory exist
+if(! -d $TMP ){ 
+	# Create directory
+  	mkdir ( $TMP );
+  	printf "Directory \"$TMP\" created.\n"; 
+}
+
+# Create an array for threads names
+my $thread_names_string = ";";
+# Array for files opens
+my @thread_name_files;
+my @threads_files = ();
+
+printf "Starting: ";
+printTime();
+
+# Open JTL file for reading
+open(MYINPUTFILE, "<$JTL_FILE");
+# Open CSV file for output
+open(MYOUTPUTFILE, ">$CSV_FILE_NAME");
+while(<MYINPUTFILE>)
+{
+	my($line) = $_;
+	chomp($line);
+	if($line =~m|^<httpSample t="(\d+)" lt="(\d+)" ts="(\d+)" s="true" lb="(.*?)" rc="20[01]" rm="(.*?)" tn="Threadgroup 1-(\d+)" dt="text" by="(\d+)"[/]{0,1}>$|)
+ 	{
+ 		# Get data
+ 		my($time,$latencytime,$timestamp,$url,$rm,$thead_name,$by) = ($1,$2,$3,$4,$5,$6,$7);
+
+		# format line and print
+		$line = sprintf("%d;%s;%s;%d", $timestamp,$thead_name,$url,$time);
+
+		# Save to file
+		print MYOUTPUTFILE "$line\n";
+				
+		# Check if thread names string has this thread name
+		if($thread_names_string !~m|;$thead_name;|)
+	 	{
+			# Add new thread name
+			$thread_names_string= $thread_names_string . $thead_name . ';';
+			$thread_name_files[$thead_name-1] = "${CSV_FILE_NAME}_${thead_name}";
+
+			# Open a file with this name
+			my $file;
+			open($file,">","${CSV_FILE_NAME}_${thead_name}");
+			$threads_files[$thead_name-1] = $file;
+			
+			# Write line
+			print $file "$line\n";
+		} else 
+		{
+			my $file = $threads_files[$thead_name-1];
+			# Write line on file already open
+			print $file "$line\n";
+		}
+ 	}
+}
+
+# Close files
+close(MYINPUTFILE);
+close(MYOUTPUTFILE);
+
+# Check if file for aggregations exists
+if( -e "${CSV_FILE_NAME}_agg")
+{
+	# Delete it
+	unlink("${CSV_FILE_NAME}_agg");
+}
+
+
+# Close all threads files for threads names
+for my $i (0..$#threads_files) {
+	my $file = $threads_files[$i];
+	close($file);
+}
+
+# We got all files we need to calculate max, min, average, etc...
+my @threads_statistics = ();
+for my $i (0..$#thread_name_files) {
+	# Calculate statistics for each of the threads	
+	my $thr = threads->create('thread_statistics', $CSV_FILE_NAME, $thread_name_files[$i]);
+	$threads_statistics[$i] = $thr;
+}
+
+# Wait till all threads finish
+for my $i (0..$#threads_statistics) {
+	if (exists $threads_statistics[$i])
+	{
+		my $thread_statistic = $threads_statistics[$i];
+		$thread_statistic->join();
+	}
+}
+
+# Generate complete statistics reading agg file
+open (FILE, "${CSV_FILE_NAME}_agg") or die "Can't open ${CSV_FILE_NAME}_agg\n";
+
+# Create vector for all data we have aggregated per thread
+my @totalSamplesVector = ();
+my @Vector = ();
+my @avrgVector = ();
+my @medianVector = ();
+my @minVector = ();
+my @maxVector = ();
+my @percentile75Vector = ();
+my @percentile85Vector = ();
+my @percentile95Vector = ();
+my @percentile99Vector = ();
+
+# extract the t="value" values into an array for analysis
+while (<FILE>) {
+	my($line) = $_;
+	chomp($line);
+	
+	if($line =~m|^(\d+) (\d+[\.]{0,1}[\d]{0,}) (\d+[\.]{0,1}[\d]{0,}) (\d+) (\d+) (\d+) (\d+) (\d+) (\d+).*$|)
+ 	{
+ 		# Get data
+ 		my($totalSamples,$avrg,$median,$min,$max,$percentile75,$percentile85,$percentile95,$percentile99) = ($1,$2,$3,$4,$5,$6,$7,$8,$9);
+ 		
+ 		# Push data to vectors
+ 		push(@totalSamplesVector, $totalSamples);
+  		push(@avrgVector, $avrg);
+   		push(@medianVector, $median);
+		push(@minVector, $min);
+ 		push(@maxVector, $max);
+ 		push(@percentile75Vector, $percentile75);
+ 		push(@percentile85Vector, $percentile85);
+ 		push(@percentile95Vector, $percentile95);
+ 		push(@percentile99Vector, $percentile99); 		
+	}
+}
+
+close(FILE);
+
+my $totalSamples = 0;
+if ($#totalSamplesVector >= 0 )
+{
+	$totalSamples = add( \@totalSamplesVector );
+}
+
+my $totalAvrg = 0;
+if ($#avrgVector >= 0 )
+{
+	$totalAvrg = average( \@avrgVector );
+}
+
+# Check data
+my $totalMin = 0;
+if ($#minVector >= 0 )
+{
+	@minVector = sort { $a <=> $b } @minVector;
+	$totalMin = $minVector[0];
+}
+my $totalMax = 0;
+if ($#maxVector >= 0 )
+{
+	@maxVector = sort { $a <=> $b } @maxVector;
+	$totalMax = $maxVector[-1];
+}
+
+printf "Total Samples %d \n", $totalSamples;
+printf "Average %f \n", $totalAvrg;
+printf "Min %f \n", $totalMin;
+printf "Max %f \n", $totalMax;
+
+	#printf "Median %f \n",  $median;
+	#printf "75th Percentile %f\n", $percentile75;
+	#printf "85th Percentile %f\n", $percentile85;
+	#printf "95th Percentile %f\n", $percentile95;
+	#printf "99th Percentile %f\n", $percentile99;	
+
+# Print html result
+open(agg_html_file_output, ">${JTL_FILE}_agg.html");
+	
+print agg_html_file_output "<td>$totalSamples</td><td>$totalAvrg</td><td>$totalMin</td><td>$totalMax</td>\n";
+	
+close(agg_file_output);
+
+
+printf "Finishing: ";
+printTime();
+
+# Subroutine to calculate statistics for thread
+sub thread_statistics {
+	@_ == 2 or die('Sub usage: thread_statistics(CSV_FILE_NAME, thread_file_name);');
+	my ($CSV_FILE_NAME,$thread_file_name) = @_;
+
+	my $LOOPTIME=0;
+	my $REQUESTNUMBER=0;
+	
+	# Create a vector for all responses, to get max, min average, etc
+	my @numbers;
+	
+	#printf "Calculating statistics for: $thread_file_name \n";
+	
+	# Open file read only
+	open(thread_file, "<$thread_file_name");
+	open(thread_file_output, ">${thread_file_name}_time");
+	while(<thread_file>)
+	{
+		my($line) = $_;
+		chomp($line);
+		if($line =~m|^(\d+);(\d+);(.*?);(\d+)$|)
+	 	{
+			# Get data
+	 		my($timestamp,$thead_name,$url,$time) = ($1,$2,$3,$4);
+	 		
+	 		# Check if it is first call
+			if ( ${url} =~m|(/gateway)?${STARTURL}|)
+			{
+				$LOOPTIME=$time;
+				$REQUESTNUMBER=1;
+			} else
+			{
+				$LOOPTIME+=$time;
+				$REQUESTNUMBER++;
+				
+				# Check if it is last request
+				if ( $REQUESTNUMBER == $NUMBEROFREQUESTPERLOOP )
+				{
+					if ( ${url} =~m|(/gateway)?${ENDURL}|)
+					{
+						# Print to file
+						print thread_file_output "${LOOPTIME} ${timestamp} ${url}\n";
+					
+						# Push value to numbers
+						push(@numbers, ${LOOPTIME});
+					}
+				}
+			}
+		}
+	}
+	# Close file
+	close(thread_file);
+	close(thread_file_output);
+	
+	# Get statistics for this thread:
+	printStatistics($CSV_FILE_NAME,\@numbers);
+	
+}
+
+
+sub percentile {
+    my ( $p, $aref ) = @_;
+    my $percentile = int( $p * $#{$aref} / 100 );
+
+    return @$aref[$percentile];
+}
+
+sub average {
+    @_ == 1 or die('Sub usage: $average = average(\@array);');
+    my ($array_ref) = @_;
+    my $sum;
+    my $count = scalar @$array_ref;
+    
+    if ($count == 0){
+    	return 0;
+    }
+    foreach (@$array_ref) {
+        $sum += $_;
+    }
+    return $sum / $count;
+}
+
+sub add {
+    @_ == 1 or die('Sub usage: $add = add(\@array);');
+    my ($array_ref) = @_;
+    my $sum;
+    foreach (@$array_ref) {
+        $sum += $_;
+    }
+    return $sum;
+}
+
+sub median {
+    @_ == 1 or die('Sub usage: $median = median(\@array);');
+    my ($array_ref) = @_;
+    my $count = scalar @$array_ref;
+
+	if ($count > 0 ) 
+	{
+	    my @array = @$array_ref;
+    	if ( $count % 2 ) {
+        	return $array[ int( $count / 2 ) ];
+	    }
+    	else {
+        	return ( $array[ $count / 2 ] + $array[ $count / 2 - 1 ] ) / 2;
+	 	}
+	 }
+	 
+	 return 0;
+}
+
+sub printTime {
+	my @months = qw(Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec);
+	my @weekDays = qw(Sun Mon Tue Wed Thu Fri Sat Sun);
+	my ($second, $minute, $hour, $dayOfMonth, $month, $yearOffset, $dayOfWeek, $dayOfYear, $daylightSavings) = localtime();
+	my $year = 1900 + $yearOffset;
+	my $theTime = "$hour:$minute:$second, $weekDays[$dayOfWeek] $months[$month] $dayOfMonth, $year";
+	printf "$theTime\n"; 
+}
+
+sub printStatistics {
+	@_ == 2 or die('Sub usage: printStatistics(CSV_FILE_NAME,\@array);');
+	my ($CSV_FILE_NAME, $array_ref) = @_;
+    my @numbers = @$array_ref;
+    
+    my $totalSamples= scalar @numbers;
+
+	my $avrg = 0;
+	my $median= 0;
+	my $min = 0;
+	my $max = 0;
+	
+	my $percentile75 = 0;
+	my $percentile85 = 0;
+	my $percentile95 = 0;
+	my $percentile99 = 0;	
+	
+	# Check if total samples are greater than 0
+	if ($totalSamples > 0)
+	{
+		@numbers = sort { $a <=> $b } @numbers;
+
+		$avrg = average( \@numbers );
+		$median= median( \@numbers );
+		$min = $numbers[0];
+		$max = $numbers[-1];
+	
+		$percentile75 = percentile( 75, \@numbers );
+		$percentile85 = percentile( 85, \@numbers );
+		$percentile95 = percentile( 95, \@numbers );
+		$percentile99 = percentile( 99, \@numbers );	
+	}
+
+	#printf "Total Samples %d \n", $totalSamples;
+	#printf "Average %f \n", $avrg;
+	#printf "Median %f \n",  $median;
+	#printf "Min %f \n",     $min;
+	#printf "Max %f \n",     $max;
+	#printf "75th Percentile %f\n", $percentile75;
+	#printf "85th Percentile %f\n", $percentile85;
+	#printf "95th Percentile %f\n", $percentile95;
+	#printf "99th Percentile %f\n", $percentile99;	
+		
+	# Print information on file
+	open(agg_file_output, ">>${CSV_FILE_NAME}_agg");
+	
+	print agg_file_output "${totalSamples} ${avrg} ${median} ${min} ${max} ${percentile75} ${percentile85} ${percentile95} ${percentile99} \n";
+	
+	close(agg_file_output);
+}
